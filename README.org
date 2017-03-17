@@ -1,0 +1,5 @@
+* OwO WHATS THIS
+
+This is a simple program that upvotes 2kinds at www.topwebcomics.com/vote/138 .
+It is a simple experiment that uses Python 3 with Pillow and Tesseract-OCR from
+github.com/tesseract-ocr/tesseract .

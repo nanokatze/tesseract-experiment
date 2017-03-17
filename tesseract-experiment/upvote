@@ -1,0 +1,131 @@
+#!/usr/bin/python3
+from sys import stdout, stderr, exit
+from io import BytesIO
+from html.parser import HTMLParser
+
+from requests import Session, get
+import PIL.Image
+import pytesseract
+from Levenshtein import StringMatcher
+
+from wat import extract
+from lev import lev
+
+DEBUGOUT = False
+
+EXPECT_TAG          = 0
+EXPECT_TAG_INPUT    = 2
+EXPECT_TAG_IMAGE    = 3
+EXPECT_MARKER_START = 4
+EXPECT_MARKER_DATA  = 5
+EXPECT_MARKER_END   = 6
+EXPECT_IMAGE_START  = 7
+EXPECT_IMAGE_DATA   = 8
+EXPECT_IMAGE_END    = 9
+EXPECT_ANSWER_START = 10
+EXPECT_ANSWER_DATA  = 11
+EXPECT_ANSWER_END   = 12
+
+class VoterException(Exception):
+
+    pass
+
+class Voter(HTMLParser):
+
+    def __init__(self):
+        HTMLParser.__init__(self)
+        self._expect = EXPECT_TAG
+        self._extra = None
+        self._image_uri = None
+        self._answers = []
+
+    def handle_starttag(self, tag, attrs):
+        attrs_pretty = {k: v for (k, v) in attrs}
+        if self._expect == EXPECT_TAG:
+            if tag == "label":
+                self._expect = EXPECT_TAG_INPUT
+            elif tag == "p":
+                self._expect = EXPECT_MARKER_DATA
+        elif self._expect == EXPECT_TAG_INPUT:
+            if tag == "input":
+                self._expect = EXPECT_ANSWER_DATA
+            else:
+                self._expect = EXPECT_TAG
+        elif self._expect == EXPECT_TAG_IMAGE:
+            if tag == "image":
+                if "src" in attrs_pretty:
+                    self._image_uri = attrs_pretty["src"]
+                self._expect = EXPECT_IMAGE_END
+        else:
+            pass
+        # stderr.write("start: {}, {}\n".format(tag, attrs_pretty))
+
+    def handle_endtag(self, tag):
+        if self._expect == EXPECT_ANSWER_END:
+            if tag == "label":
+                self._expect = EXPECT_TAG
+        elif self._expect == EXPECT_MARKER_END:
+            if tag == "p":
+                self._expect = EXPECT_TAG_IMAGE if self._extra else EXPECT_TAG
+        elif self._expect == EXPECT_IMAGE_END:
+            self._expect = EXPECT_TAG
+        # stderr.write("end: {}\n".format(tag))
+
+    def handle_data(self, text):
+        if self._expect == EXPECT_ANSWER_DATA:
+            self._answers.append(text)
+            self._expect = EXPECT_ANSWER_END
+        elif self._expect == EXPECT_MARKER_DATA:
+            self._extra = text.strip() == ("Please select the name of "
+                                           "the character in the image.")
+            self._expect = EXPECT_MARKER_END
+        else:
+            pass
+        # stderr.write("text: {}\n".format(text))
+
+sess = Session()
+resp = sess.get("http://www.topwebcomics.com/vote/138")
+if resp.status_code == 200:
+    parser = Voter()
+    parser.feed(resp.text)
+    stderr.write("answers {}\n".format(parser._answers))
+    stderr.write("image {}\n".format(parser._image_uri))
+    imresp = get(parser._image_uri)
+    if imresp.status_code == 200:
+        stderr.write("image get ok\n")
+        with PIL.Image.open(BytesIO(imresp.content)) as im:
+            name = parser._image_uri.split('/')[-1].split(".")[0]
+            if DEBUGOUT:
+                im.save(name + ".0.png", "PNG")
+            stderr.write("image open ok\n")
+            xt = extract(im)
+            if DEBUGOUT:
+                xt.save(name + ".1.png", "PNG")
+            text = pytesseract.image_to_string(xt)
+            for (i, line) in enumerate(text.splitlines()):
+                stderr.write("ocr text[{}]: {}\n".format(i, line))
+            dists = []
+            for answer in parser._answers:
+                for line in text.splitlines():
+                    dists.append((lev(answer, line), answer))
+            likely = sorted(dists, key=lambda x: x[0])
+            if len(likely) > 0:
+                (_, answer) = likely[0]
+                stderr.write("answer {}\n".format(answer))
+                resp = sess.post("http://www.topwebcomics.com/vote/138",
+                                 data={"selected_option": answer,
+                                       "key": answer,
+                                       "id": name})
+                resp.close()
+                exit(0)
+            else:
+                stderr.write("error: don't know what to answer\n")
+                exit(1)
+    else:
+        stderr.write("image get ({})\n".format(resp.status_code))
+        exit(1)
+    im.close()
+else:
+    stderr.write("vote get ({})\n".format(resp.status_code))
+    exit(1)
+resp.close()
